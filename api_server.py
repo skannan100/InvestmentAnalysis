@@ -1,35 +1,37 @@
 #!/usr/bin/env python3
 """
 Simple Flask API server for Portfolio Ledger Dashboard
-Serves holdings data from local DuckDB database
+Serves holdings data from local SQLite database
 """
 
 import json
-import duckdb
+import sqlite3
 from flask import Flask, jsonify
 from datetime import datetime
 from pathlib import Path
 
 app = Flask(__name__)
 
-# Path to DuckDB database
-DB_PATH = Path(__file__).parent / "portfolio.duckdb"
+# Path to SQLite database
+DB_PATH = Path(__file__).parent / "portfolio.db"
 
 def get_db():
-    """Get or create DuckDB connection"""
-    conn = duckdb.connect(str(DB_PATH), read_only=False)
+    """Get SQLite connection"""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row  # Return rows as dicts
     return conn
 
 def init_db():
     """Initialize database with schema and seed data"""
     conn = get_db()
+    cursor = conn.cursor()
     
     # Read and execute schema
     schema_path = Path(__file__).parent / "schema.sql"
     if schema_path.exists():
         with open(schema_path, 'r') as f:
             schema_sql = f.read()
-            conn.execute(schema_sql)
+            cursor.executescript(schema_sql)
     
     # Read and execute seed data
     seed_path = Path(__file__).parent / "seed_data.sql"
@@ -37,30 +39,31 @@ def init_db():
         with open(seed_path, 'r') as f:
             seed_sql = f.read()
             try:
-                conn.execute(seed_sql)
+                cursor.executescript(seed_sql)
+                conn.commit()
             except Exception as e:
-                # Data may already exist, continue
+                # Data may already exist
                 print(f"Note: Seed data load returned: {e}")
     
     conn.close()
 
 def format_holdings(row):
-    """Convert DuckDB row to portfolio holdings format"""
+    """Convert SQLite row to portfolio holdings format"""
     return {
-        "id": row[0],
-        "name": row[1],
-        "ticker": row[2],
-        "sector": row[3],
-        "qty": int(row[4]) if row[4] else 0,
-        "avgCost": float(row[5]) if row[5] else 0,
-        "invested": float(row[6]) if row[6] else 0,
-        "value": float(row[7]) if row[7] else 0,
-        "pe": float(row[8]) if row[8] else None,
-        "marketCap": row[9],
-        "w52h": float(row[10]) if row[10] else None,
-        "w52l": float(row[11]) if row[11] else None,
-        "lastUpdated": str(row[12]) if row[12] else None,
-        "assessment": json.loads(row[13]) if row[13] else None
+        "id": row['id'],
+        "name": row['name'],
+        "ticker": row['ticker'],
+        "sector": row['sector'],
+        "qty": row['qty'] or 0,
+        "avgCost": float(row['avg_cost']) if row['avg_cost'] else 0,
+        "invested": float(row['invested']) if row['invested'] else 0,
+        "value": float(row['value']) if row['value'] else 0,
+        "pe": float(row['pe']) if row['pe'] else None,
+        "marketCap": row['market_cap'],
+        "w52h": float(row['w52h']) if row['w52h'] else None,
+        "w52l": float(row['w52l']) if row['w52l'] else None,
+        "lastUpdated": row['last_updated'],
+        "assessment": json.loads(row['assessment']) if row['assessment'] else None
     }
 
 @app.route('/api/holdings', methods=['GET'])
@@ -71,6 +74,7 @@ def get_holdings():
     """
     try:
         conn = get_db()
+        cursor = conn.cursor()
         query = """
             SELECT 
                 id, name, ticker, sector, qty, avg_cost, invested, value,
@@ -78,94 +82,12 @@ def get_holdings():
             FROM portfolio_holdings
             ORDER BY ticker
         """
-        result = conn.execute(query).fetchall()
+        cursor.execute(query)
+        result = cursor.fetchall()
         conn.close()
         
         holdings = [format_holdings(row) for row in result]
         return jsonify(holdings), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/evaluations', methods=['GET'])
-def get_evaluations():
-    """
-    GET /api/evaluations
-    Returns all evaluations as JSON array
-    """
-    try:
-        conn = get_db()
-        query = """
-            SELECT 
-                evaluation_id, company_name, ticker, sector, decision,
-                investment_attractiveness, thesis_status, overall_confidence,
-                decision_rationale, analysis_date
-            FROM evaluations
-            ORDER BY analysis_date DESC
-        """
-        result = conn.execute(query).fetchall()
-        conn.close()
-        
-        evaluations = [
-            {
-                "evaluation_id": row[0],
-                "company_name": row[1],
-                "ticker": row[2],
-                "sector": row[3],
-                "decision": row[4],
-                "investment_attractiveness": row[5],
-                "thesis_status": row[6],
-                "overall_confidence": row[7],
-                "decision_rationale": row[8],
-                "analysis_date": str(row[9])
-            }
-            for row in result
-        ]
-        return jsonify(evaluations), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/evaluation/<ticker>', methods=['GET'])
-def get_evaluation(ticker):
-    """
-    GET /api/evaluation/<ticker>
-    Returns full evaluation details for a specific stock
-    """
-    try:
-        conn = get_db()
-        query = """
-            SELECT * FROM evaluations
-            WHERE ticker = ?
-            ORDER BY analysis_date DESC
-            LIMIT 1
-        """
-        result = conn.execute(query, [ticker]).fetchall()
-        conn.close()
-        
-        if not result:
-            return jsonify({"error": f"No evaluation found for ticker {ticker}"}), 404
-        
-        # For simplicity, return as JSON string representation
-        # In production, map all columns to a dict
-        row = result[0]
-        evaluation = {
-            "evaluation_id": row[0],
-            "company_name": row[1],
-            "ticker": row[2],
-            "exchange": row[3],
-            "sector": row[4],
-            "industry": row[5],
-            "analysis_date": str(row[6]),
-            "decision": row[46],
-            "decision_rationale": row[47],
-            "primary_bull_case": row[34],
-            "primary_bear_case": row[35],
-            "biggest_unknown": row[36],
-            "investment_thesis_summary": row[10],
-            "full_factor_detail": json.loads(row[48]) if row[48] else None
-        }
-        return jsonify(evaluation), 200
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
